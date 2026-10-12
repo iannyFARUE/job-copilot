@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.models import CandidateProfile, JobExtractionRequest, JobRequirements,JobMatchResult
+from app.models import CandidateProfile, JobExtractionRequest, JobRequirements,JobMatchResult, JobAnalysisResult
 from app.candidate_data import candidate_profile
 import logging
 
@@ -35,8 +35,11 @@ def get_profile() -> CandidateProfile:
 
 @app.post("/jobs/extract", response_model=JobRequirements)
 def extract_job(request: JobExtractionRequest) -> JobRequirements:
+    return extract_job_or_raise(request.description)
+
+def extract_job_or_raise(description: str) -> JobRequirements:
     try:
-        return extract_job_requirements(request.description)
+        return extract_job_requirements(description)
 
     except APITimeoutError as exc:
         raise HTTPException(
@@ -69,3 +72,18 @@ def extract_job(request: JobExtractionRequest) -> JobRequirements:
 @app.post("/jobs/match", response_model=JobMatchResult)
 def match_job_endpoint(job: JobRequirements) -> JobMatchResult:
     return match_job(job, candidate_profile)
+
+
+@app.post("/jobs/analyze", response_model=JobAnalysisResult)
+def analyze_job(request: JobExtractionRequest) -> JobAnalysisResult:
+    requirements = extract_job_or_raise(request.description)
+
+    match_result = match_job(
+        job=requirements,
+        profile=candidate_profile,
+    )
+
+    return JobAnalysisResult(
+        requirements=requirements,
+        match=match_result,
+    )

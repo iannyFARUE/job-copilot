@@ -47,3 +47,8 @@ class JobMatchResult(BaseModel):
     required_matches: list[SkillMatch]
     preferred_matches: list[SkillMatch]
     needs_review: list[str]
+
+
+class JobAnalysisResult(BaseModel):
+    requirements: JobRequirements
+    match: JobMatchResult
