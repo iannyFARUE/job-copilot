@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.models import CandidateProfile, JobExtractionRequest, JobRequirements
+from app.models import CandidateProfile, JobExtractionRequest, JobRequirements,JobMatchResult
 from app.candidate_data import candidate_profile
 import logging
 
@@ -14,7 +14,7 @@ from openai import (
 from pydantic import ValidationError
 
 from app.llm_service import ExtractionError, extract_job_requirements
-
+from app.matching_service import match_job
 
 logger = logging.getLogger(__name__)
 
@@ -65,3 +65,7 @@ def extract_job(request: JobExtractionRequest) -> JobRequirements:
             status_code=502,
             detail="The model could not produce a valid extraction.",
         ) from exc
+
+@app.post("/jobs/match", response_model=JobMatchResult)
+def match_job_endpoint(job: JobRequirements) -> JobMatchResult:
+    return match_job(job, candidate_profile)

@@ -34,3 +34,16 @@ class JobRequirements(BaseModel):
     minimum_years_experience: float | None
     work_arrangement: Literal["remote", "hybrid", "onsite"] | None
     location: str | None
+
+class SkillMatch(BaseModel):
+    skill: str
+    status: Literal["project_evidence", "listed_only", "not_found"]
+    project_ids: list[str]
+    evidence: list[str]
+
+
+class JobMatchResult(BaseModel):
+    title: str | None
+    required_matches: list[SkillMatch]
+    preferred_matches: list[SkillMatch]
+    needs_review: list[str]
