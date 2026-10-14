@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
-from app.models import CandidateProfile, JobExtractionRequest, JobRequirements,JobMatchResult, JobAnalysisResult
+from app.models import CandidateProfile, JobExtractionRequest, JobRequirements,JobMatchResult, JobAnalysisResult, AgentRequest, AgentResponse
+from app.agent_service import AgentError, ask_agent
 from app.candidate_data import candidate_profile
 import logging
 
@@ -87,3 +88,37 @@ def analyze_job(request: JobExtractionRequest) -> JobAnalysisResult:
         requirements=requirements,
         match=match_result,
     )
+
+@app.post("/agent/ask", response_model=AgentResponse)
+def agent_ask(request: AgentRequest) -> AgentResponse:
+    try:
+        return ask_agent(request.question)
+
+    except APITimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="The model request timed out.",
+        ) from exc
+
+    except APIError as exc:
+        logger.warning(
+            "Agent request failed: %s, status=%s",
+            type(exc).__name__,
+            getattr(exc, "status_code", None),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="The model request failed. Check server logs.",
+        ) from exc
+
+    except AgentError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc),
+        ) from exc
+
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="The model supplied invalid tool arguments.",
+        ) from exc
