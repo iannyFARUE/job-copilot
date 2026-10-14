@@ -52,3 +52,11 @@ class JobMatchResult(BaseModel):
 class JobAnalysisResult(BaseModel):
     requirements: JobRequirements
     match: JobMatchResult
+
+class AgentRequest(BaseModel):
+    question: str = Field(min_length=5, max_length=3000)
+
+
+class AgentResponse(BaseModel):
+    answer: str
+    lookups: list[SkillMatch]
