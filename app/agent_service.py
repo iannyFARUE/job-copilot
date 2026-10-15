@@ -6,7 +6,11 @@ from app.llm_service import get_client
 from app.matching_service import match_skill
 from app.models import AgentResponse
 from app.candidate_data import candidate_profile
+import operator
+from typing import Annotated, Any, Literal, TypedDict
 
+from langgraph.errors import GraphRecursionError
+from langgraph.graph import END, START, StateGraph
 
 class AgentError(Exception):
     pass
@@ -54,78 +58,144 @@ Rules:
 - Keep the answer concise.
 """
 
-def ask_agent(question: str) -> AgentResponse:
-    messages = [
-        {"role": "system", "content": AGENT_PROMPT},
-        {"role": "user", "content": question},
-    ]
+class AgentState(TypedDict):
+    messages: Annotated[list[dict[str, Any]], operator.add]
+    lookups: Annotated[list[dict[str, Any]], operator.add]
+    model_calls: int
 
-    lookups = []
-
-    # Up to four model requests per question.
-    for _ in range(4):
-        completion = get_client().chat.completions.create(
-            model=os.getenv("LLM_MODEL", "gpt-4.1-mini"),
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            parallel_tool_calls=False,
-            max_completion_tokens=1000,
+def call_model(state: AgentState) -> dict[str, Any]:
+    if state["model_calls"] >= 4:
+        raise AgentError(
+            "The agent reached its model-call limit. "
+            "Try asking about fewer skills."
         )
 
-        choice = completion.choices[0]
-        message = choice.message
+    completion = get_client().chat.completions.create(
+        model=os.getenv("LLM_MODEL", "gpt-4.1-mini"),
+        messages=state["messages"],
+        tools=TOOLS,
+        tool_choice="auto",
+        parallel_tool_calls=False,
+        max_completion_tokens=1000,
+    )
 
-        if message.refusal:
-            raise AgentError("The model declined the request.")
+    choice = completion.choices[0]
+    message = choice.message
 
-        if choice.finish_reason not in {"stop", "tool_calls"}:
-            raise AgentError("The model response was incomplete.")
+    if message.refusal:
+        raise AgentError("The model declined the request.")
 
-        # No tool request means the model is ready to answer.
-        if not message.tool_calls:
-            if not message.content:
-                raise AgentError("The model returned an empty answer.")
+    if choice.finish_reason not in {"stop", "tool_calls"}:
+        raise AgentError("The model response was incomplete.")
 
-            return AgentResponse(
-                answer=message.content,
-                lookups=lookups,
-            )
+    if not message.tool_calls and not message.content:
+        raise AgentError("The model returned an empty answer.")
 
-        # Preserve the model's request before adding tool results.
-        messages.append({
-            "role": "assistant",
-            "content": message.content,
-            "tool_calls": [
-                call.model_dump(exclude_none=True)
-                for call in message.tool_calls
-            ],
+    assistant_message = {
+        "role": "assistant",
+        "content": message.content,
+    }
+
+    if message.tool_calls:
+        assistant_message["tool_calls"] = [
+            call.model_dump(exclude_none=True)
+            for call in message.tool_calls
+        ]
+
+    return {
+        "messages": [assistant_message],
+        "model_calls": state["model_calls"] + 1,
+    }
+
+def execute_tools(state: AgentState) -> dict[str, Any]:
+    last_message = state["messages"][-1]
+
+    tool_messages = []
+    new_lookups = []
+
+    for call in last_message.get("tool_calls", []):
+        if (
+            call["type"] != "function"
+            or call["function"]["name"] != "lookup_skill_evidence"
+        ):
+            raise AgentError("The model requested an unsupported tool.")
+
+        args = SkillLookupArgs.model_validate_json(
+            call["function"]["arguments"]
+        )
+
+        result = match_skill(
+            skill=args.skill,
+            profile=candidate_profile,
+        )
+
+        new_lookups.append(result.model_dump(mode="json"))
+
+        tool_messages.append({
+            "role": "tool",
+            "tool_call_id": call["id"],
+            "content": result.model_dump_json(),
         })
 
-        for call in message.tool_calls:
-            # Only our explicitly allowed function can execute.
-            if (
-                call.type != "function"
-                or call.function.name != "lookup_skill_evidence"
-            ):
-                raise AgentError("The model requested an unsupported tool.")
+    return {
+        "messages": tool_messages,
+        "lookups": new_lookups,
+    }
 
-            args = SkillLookupArgs.model_validate_json(
-                call.function.arguments
-            )
 
-            result = match_skill(
-                skill=args.skill,
-                profile=candidate_profile,
-            )
-            lookups.append(result)
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": result.model_dump_json(),
-            })
+def route_after_model(
+    state: AgentState,
+) -> Literal["tools", "done"]:
+    last_message = state["messages"][-1]
 
-    raise AgentError(
-        "The agent reached its step limit. Try asking about fewer skills."
+    if last_message.get("tool_calls"):
+        return "tools"
+
+    return "done"
+
+
+builder = StateGraph(AgentState)
+
+builder.add_node("model", call_model)
+builder.add_node("tools", execute_tools)
+
+builder.add_edge(START, "model")
+
+builder.add_conditional_edges(
+    "model",
+    route_after_model,
+    {
+        "tools": "tools",
+        "done": END,
+    },
+)
+
+builder.add_edge("tools", "model")
+
+agent_graph = builder.compile()
+
+def ask_agent(question: str) -> AgentResponse:
+    initial_state: AgentState = {
+        "messages": [
+            {"role": "system", "content": AGENT_PROMPT},
+            {"role": "user", "content": question},
+        ],
+        "lookups": [],
+        "model_calls": 0,
+    }
+
+    try:
+        final_state = agent_graph.invoke(
+            initial_state,
+            config={"recursion_limit": 12},
+        )
+    except GraphRecursionError as exc:
+        raise AgentError(
+            "The agent exceeded its graph execution limit."
+        ) from exc
+
+    return AgentResponse(
+        answer=final_state["messages"][-1]["content"],
+        lookups=final_state["lookups"],
     )
