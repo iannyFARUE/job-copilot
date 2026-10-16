@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal, TypedDict
 
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
+from langgraph.checkpoint.memory import InMemorySaver
 
 class AgentError(Exception):
     pass
@@ -64,6 +65,12 @@ class AgentState(TypedDict):
     model_calls: int
 
 def call_model(state: AgentState) -> dict[str, Any]:
+    print(
+    "Model call:",
+    state["model_calls"] + 1,
+    "| Message count:",
+    len(state["messages"]),
+)
     if state["model_calls"] >= 4:
         raise AgentError(
             "The agent reached its model-call limit. "
@@ -173,22 +180,53 @@ builder.add_conditional_edges(
 
 builder.add_edge("tools", "model")
 
-agent_graph = builder.compile()
+checkpointer = InMemorySaver()
+agent_graph = builder.compile(checkpointer=checkpointer)
 
-def ask_agent(question: str) -> AgentResponse:
-    initial_state: AgentState = {
-        "messages": [
-            {"role": "system", "content": AGENT_PROMPT},
-            {"role": "user", "content": question},
-        ],
-        "lookups": [],
+def ask_agent(question: str, thread_id: str) -> AgentResponse:
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": 12,
+    }
+
+    snapshot = agent_graph.get_state(config)
+
+    # Don't append a new question to an unfinished tool conversation.
+    if snapshot.next:
+        raise AgentError(
+            "This thread has an unfinished run. "
+            "Use a new thread_id for now; we'll add recovery next."
+        )
+
+    previous_messages = snapshot.values.get("messages", [])
+    previous_lookup_count = len(
+        snapshot.values.get("lookups", [])
+    )
+
+    new_messages = []
+
+    # Add the system prompt only when starting this conversation.
+    if not previous_messages:
+        new_messages.append({
+            "role": "system",
+            "content": AGENT_PROMPT,
+        })
+
+    new_messages.append({
+        "role": "user",
+        "content": question,
+    })
+
+    # Send only new messages. LangGraph restores the existing state.
+    updates = {
+        "messages": new_messages,
         "model_calls": 0,
     }
 
     try:
         final_state = agent_graph.invoke(
-            initial_state,
-            config={"recursion_limit": 12},
+            updates,
+            config=config,
         )
     except GraphRecursionError as exc:
         raise AgentError(
@@ -196,6 +234,9 @@ def ask_agent(question: str) -> AgentResponse:
         ) from exc
 
     return AgentResponse(
+        thread_id=thread_id,
         answer=final_state["messages"][-1]["content"],
-        lookups=final_state["lookups"],
+        lookups=final_state.get("lookups", [])[
+            previous_lookup_count:
+        ],
     )

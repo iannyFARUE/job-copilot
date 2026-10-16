@@ -54,9 +54,15 @@ class JobAnalysisResult(BaseModel):
     match: JobMatchResult
 
 class AgentRequest(BaseModel):
+    thread_id: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[a-zA-Z0-9_-]+$",
+    )
     question: str = Field(min_length=5, max_length=3000)
 
 
 class AgentResponse(BaseModel):
+    thread_id: str
     answer: str
     lookups: list[SkillMatch]
