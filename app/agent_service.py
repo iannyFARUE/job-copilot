@@ -186,8 +186,9 @@ builder.add_conditional_edges(
 
 builder.add_edge("tools", "model")
 
-checkpointer = InMemorySaver()
-agent_graph = builder.compile(checkpointer=checkpointer)
+def build_agent_graph(checkpointer):
+    return builder.compile(checkpointer=checkpointer)
+
 
 def ask_agent(question: str, thread_id: str) -> AgentResponse:
     config = {
