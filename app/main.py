@@ -109,12 +109,14 @@ def analyze_job(request: JobExtractionRequest) -> JobAnalysisResult:
     )
 
 @app.post("/agent/ask", response_model=AgentResponse)
-def agent_ask(request: AgentRequest) -> AgentResponse:
+def agent_ask(request: AgentRequest,
+    http_request: Request) -> AgentResponse:
     try:
         return ask_agent(
-    question=request.question,
-    thread_id=request.thread_id,
-)
+            question=request.question,
+            thread_id=request.thread_id,
+            graph=http_request.app.state.agent_graph,
+        )
 
     except APITimeoutError as exc:
         raise HTTPException(

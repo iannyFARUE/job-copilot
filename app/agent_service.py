@@ -69,6 +69,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[dict[str, Any]], operator.add]
     lookups: Annotated[list[dict[str, Any]], operator.add]
     model_calls: int
+    turn_lookup_start: int
 
 def call_model(state: AgentState) -> dict[str, Any]:
     print(
@@ -190,30 +191,66 @@ def build_agent_graph(checkpointer):
     return builder.compile(checkpointer=checkpointer)
 
 
-def ask_agent(question: str, thread_id: str) -> AgentResponse:
-    config = {
+
+def thread_config(thread_id: str) -> dict[str, Any]:
+    return {
         "configurable": {"thread_id": thread_id},
         "recursion_limit": 12,
     }
 
-    snapshot = agent_graph.get_state(config)
 
-    # Don't append a new question to an unfinished tool conversation.
+def response_from_state(
+    state: AgentState,
+    thread_id: str,
+) -> AgentResponse:
+    last_message = state["messages"][-1]
+
+    if (
+        last_message["role"] != "assistant"
+        or last_message.get("tool_calls")
+        or not last_message.get("content")
+    ):
+        raise AgentError("The run has not produced a final answer.")
+
+    return AgentResponse(
+        thread_id=thread_id,
+        answer=last_message["content"],
+        lookups=state.get("lookups", [])[
+            state["turn_lookup_start"]:
+        ],
+    )
+
+
+def invoke_agent(graph, inputs, config):
+    try:
+        return graph.invoke(
+            inputs,
+            config=config,
+            durability="sync",
+        )
+    except GraphRecursionError as exc:
+        raise AgentError(
+            "The agent exceeded its graph execution limit."
+        ) from exc
+
+
+def ask_agent(
+    question: str,
+    thread_id: str,
+    graph,
+) -> AgentResponse:
+    config = thread_config(thread_id)
+    snapshot = graph.get_state(config)
+
     if snapshot.next:
         raise AgentError(
             "This thread has an unfinished run. "
-            "Use a new thread_id for now; we'll add recovery next."
+            "Use /agent/resume before asking another question."
         )
-
-    previous_messages = snapshot.values.get("messages", [])
-    previous_lookup_count = len(
-        snapshot.values.get("lookups", [])
-    )
 
     new_messages = []
 
-    # Add the system prompt only when starting this conversation.
-    if not previous_messages:
+    if not snapshot.values.get("messages"):
         new_messages.append({
             "role": "system",
             "content": AGENT_PROMPT,
@@ -224,26 +261,29 @@ def ask_agent(question: str, thread_id: str) -> AgentResponse:
         "content": question,
     })
 
-    # Send only new messages. LangGraph restores the existing state.
     updates = {
         "messages": new_messages,
         "model_calls": 0,
+        "turn_lookup_start": len(
+            snapshot.values.get("lookups", [])
+        ),
     }
 
-    try:
-        final_state = agent_graph.invoke(
-            updates,
-            config=config,
-        )
-    except GraphRecursionError as exc:
-        raise AgentError(
-            "The agent exceeded its graph execution limit."
-        ) from exc
+    final_state = invoke_agent(graph, updates, config)
 
-    return AgentResponse(
-        thread_id=thread_id,
-        answer=final_state["messages"][-1]["content"],
-        lookups=final_state.get("lookups", [])[
-            previous_lookup_count:
-        ],
-    )
+    return response_from_state(final_state, thread_id)
+
+
+def resume_agent(thread_id: str, graph) -> AgentResponse:
+    config = thread_config(thread_id)
+    snapshot = graph.get_state(config)
+
+    if not snapshot.values:
+        raise AgentError("No saved conversation exists for this thread.")
+
+    if not snapshot.next:
+        raise AgentError("This thread has no unfinished run to resume.")
+
+    final_state = invoke_agent(graph, None, config)
+
+    return response_from_state(final_state, thread_id)
