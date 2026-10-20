@@ -66,3 +66,10 @@ class AgentResponse(BaseModel):
     thread_id: str
     answer: str
     lookups: list[SkillMatch]
+
+class AgentResumeRequest(BaseModel):
+    thread_id: str = Field(
+        min_length=1,
+        max_length=100,
+        pattern=r"^[a-zA-Z0-9_-]+$",
+    )
